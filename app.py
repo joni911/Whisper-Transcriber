@@ -65,33 +65,42 @@ def upload_file():
             'start_time': time.time()
         }
         
-        # Proses transkripsi di background
+        # Proses transkripsi di background dengan progress callback
         def process_transcription(job_id, filepath, filename):
             try:
                 start_time = time.time()
                 
-                # Update progress
-                transcription_progress[job_id]['progress'] = 10
-                transcription_progress[job_id]['message'] = 'Mengekstrak audio...'
+                # Progress callback function
+                def progress_callback(progress, message):
+                    if job_id in transcription_progress:
+                        transcription_progress[job_id]['message'] = message
+                        if progress is not None:
+                            transcription_progress[job_id]['progress'] = progress
+                        # Update elapsed time
+                        elapsed = time.time() - transcription_progress[job_id]['start_time']
+                        transcription_progress[job_id]['elapsed_time'] = elapsed
+                
+                # Update progress awal
+                progress_callback(5, 'Mempersiapkan proses...')
                 
                 # Dapatkan durasi file untuk estimasi waktu
                 duration = transcriber.get_audio_duration(filepath)
                 if duration:
-                    # Estimasi: 1 menit audio = 0.5-1 menit proses (tergantung GPU/CPU)
+                    # Estimasi: 1 menit audio = 0.7-2.0 menit proses
                     speed_factor = 0.7 if transcriber.gpu_available else 2.0
                     estimated_time = duration * speed_factor / 60  # dalam menit
                     transcription_progress[job_id]['estimated_time'] = estimated_time
-                    transcription_progress[job_id]['message'] = f'Mengekstrak audio... (Estimasi: {estimated_time:.1f} menit)'
                 
-                # Transcribe
-                transcription, duration, word_count = transcriber.transcribe(filepath)
+                # Transcribe dengan progress tracking
+                transcription, duration, word_count = transcriber.transcribe_with_progress(
+                    filepath, progress_callback
+                )
                 
                 if transcription:
                     # Update elapsed time
                     elapsed = time.time() - start_time
                     transcription_progress[job_id]['elapsed_time'] = elapsed
-                    transcription_progress[job_id]['progress'] = 80
-                    transcription_progress[job_id]['message'] = 'Menyimpan hasil...'
+                    progress_callback(95, 'Menyimpan hasil...')
                     
                     # Simpan transkripsi ke file
                     transcript_filename = os.path.splitext(filename)[0] + '.txt'
@@ -112,8 +121,7 @@ def upload_file():
                     # Update final time
                     final_elapsed = time.time() - start_time
                     transcription_progress[job_id]['elapsed_time'] = final_elapsed
-                    transcription_progress[job_id]['progress'] = 100
-                    transcription_progress[job_id]['message'] = f'Selesai dalam {final_elapsed/60:.1f} menit!'
+                    progress_callback(100, f'Selesai dalam {final_elapsed/60:.1f} menit!')
                     transcription_progress[job_id]['status'] = 'completed'
                     print(f"✅ Transkripsi selesai: {filename}")
                 else:
