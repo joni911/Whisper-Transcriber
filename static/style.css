@@ -1,0 +1,29 @@
+body {
+    background-color: #f8f9fa;
+}
+
+.card {
+    box-shadow: 0 0.125rem 0.25rem rgba(0, 0, 0, 0.075);
+    border: 1px solid rgba(0, 0, 0, 0.125);
+}
+
+.btn {
+    border-radius: 0.375rem;
+}
+
+.table th {
+    border-top: none;
+}
+
+.alert {
+    border-radius: 0.375rem;
+}
+
+pre {
+    background-color: white;
+    padding: 1rem;
+    border-radius: 0.375rem;
+    border: 1px solid #dee2e6;
+    max-height: 500px;
+    overflow-y: auto;
+}
