@@ -86,8 +86,9 @@ class AudioTranscriber:
             
             # Dapatkan durasi total
             duration = self.get_audio_duration(audio_file)
-            if not duration:
-                return [audio_file]  # Return original jika tidak bisa dapat durasi
+            if not duration or duration <= 0:
+                print("⚠️  Tidak bisa mendapatkan durasi, menggunakan file penuh")
+                return []  # Return empty list jika tidak bisa dapat durasi
             
             # Split ke chunk
             start_time = 0
@@ -104,20 +105,41 @@ class AudioTranscriber:
                     chunk_file
                 ]
                 
-                result = subprocess.run(command, capture_output=True, text=True)
+                result = subprocess.run(command, capture_output=True, text=True, timeout=60)
                 if result.returncode == 0 and os.path.exists(chunk_file):
-                    chunks.append(chunk_file)
+                    file_size = os.path.getsize(chunk_file)
+                    if file_size > 0:  # Cek apakah file tidak kosong
+                        chunks.append(chunk_file)
+                    else:
+                        print(f"⚠️  Chunk {chunk_index} kosong, dilewati")
+                        # Hapus file kosong
+                        try:
+                            os.remove(chunk_file)
+                        except:
+                            pass
+                else:
+                    print(f"⚠️  Gagal membuat chunk {chunk_index}")
                 
                 start_time = end_time
                 chunk_index += 1
             
+            if not chunks:
+                print("⚠️  Tidak ada chunk yang berhasil dibuat")
+                return []
+            
+            print(f"✅ Berhasil membuat {len(chunks)} chunk")
             return chunks
+        except subprocess.TimeoutExpired:
+            print("❌ Timeout saat membuat chunk")
+            return []
         except Exception as e:
             print(f"❌ Error splitting audio: {e}")
-            return [audio_file]
+            return []
     
     def transcribe_with_progress(self, input_file, progress_callback=None):
         """Transcribe dengan progress tracking"""
+        temp_files_to_cleanup = []  # Track semua file temporary
+        
         try:
             # Cek ekstensi file
             _, ext = os.path.splitext(input_file.lower())
@@ -125,24 +147,48 @@ class AudioTranscriber:
             if ext in ['.wav', '.mp3', '.flac', '.m4a']:
                 audio_file = input_file
                 print("🎵 Menggunakan file audio langsung")
+                if progress_callback:
+                    progress_callback(5, "Memvalidasi file audio...")
             else:
                 # Ekstrak audio dari video
                 audio_file = os.path.splitext(input_file)[0] + '_extracted.wav'
-                if not self.extract_audio(input_file, audio_file):
-                    return None, None, None
+                temp_files_to_cleanup.append(audio_file)  # Tambah ke cleanup list
+                if progress_callback:
+                    progress_callback(5, "Mengekstrak audio dari video...")
+                
+                try:
+                    if not self.extract_audio(input_file, audio_file):
+                        raise Exception("Gagal mengekstrak audio")
+                except Exception as extract_error:
+                    if progress_callback:
+                        progress_callback(None, f"Gagal ekstraksi: {str(extract_error)}")
+                    raise extract_error
+            
+            # Validasi file audio hasil ekstraksi
+            if not os.path.exists(audio_file) or os.path.getsize(audio_file) == 0:
+                raise Exception("File audio hasil ekstraksi tidak valid")
             
             # Dapatkan durasi untuk estimasi
+            if progress_callback:
+                progress_callback(10, "Menghitung durasi audio...")
+            
             duration = self.get_audio_duration(audio_file)
             
             # Split audio ke chunk untuk progress tracking
-            print("🔄 Memecah audio ke chunk...")
+            if progress_callback:
+                progress_callback(15, "Mempersiapkan chunk audio...")
+            
             chunks = self.split_audio_to_chunks(audio_file, chunk_duration=30)  # 30 detik per chunk
+            temp_files_to_cleanup.extend(chunks)  # Tambah semua chunk ke cleanup list
             total_chunks = len(chunks)
             
             if progress_callback:
-                progress_callback(5, f"Mempersiapkan {total_chunks} segmen...")
+                progress_callback(20, f"Mempersiapkan {total_chunks} segmen...")
             
             # Load model
+            if progress_callback:
+                progress_callback(25, "Memuat model Whisper...")
+            
             model = self.load_model()
             
             # Transcribe setiap chunk
@@ -153,10 +199,15 @@ class AudioTranscriber:
             
             for i, chunk_file in enumerate(chunks):
                 if progress_callback:
-                    progress = 10 + int((i / total_chunks) * 80)  # 10% - 90%
+                    progress = 30 + int((i / total_chunks) * 60)  # 30% - 90%
                     progress_callback(progress, f"Memproses segmen {i+1}/{total_chunks}...")
                 
                 try:
+                    # Cek apakah chunk valid
+                    if not os.path.exists(chunk_file) or os.path.getsize(chunk_file) == 0:
+                        print(f"⚠️  Chunk {i} tidak valid, dilewati")
+                        continue
+                    
                     # Transcribe chunk
                     result = model.transcribe(
                         chunk_file,
@@ -169,17 +220,9 @@ class AudioTranscriber:
                     transcriptions.append(chunk_text)
                     total_word_count += len(chunk_text.split())
                     
-                    # Hapus chunk temporary
-                    if chunk_file != audio_file:  # Jangan hapus file asli
-                        try:
-                            os.remove(chunk_file)
-                        except:
-                            pass
-                
                 except Exception as chunk_error:
                     print(f"❌ Error transcribing chunk {i}: {chunk_error}")
-                    if progress_callback:
-                        progress_callback(None, f"Error segmen {i+1}: {str(chunk_error)}")
+                    # Jangan stop proses, lanjut ke chunk berikutnya
                     continue
             
             # Gabungkan semua transkripsi
@@ -194,4 +237,21 @@ class AudioTranscriber:
         except Exception as e:
             logger.error(f"Error dalam transkripsi: {e}")
             print(f"❌ Error transkripsi: {e}")
-            return None, None, None
+            raise e
+        finally:
+            # Cleanup semua file temporary
+            self.cleanup_temp_files(temp_files_to_cleanup, input_file)
+        
+    def cleanup_temp_files(self, temp_files, original_file):
+        """Cleanup file temporary dengan aman"""
+        try:
+            for temp_file in temp_files:
+                # Jangan hapus file asli
+                if temp_file and temp_file != original_file and os.path.exists(temp_file):
+                    try:
+                        os.remove(temp_file)
+                        print(f"🗑️  File temporary dihapus: {os.path.basename(temp_file)}")
+                    except Exception as e:
+                        print(f"⚠️  Gagal menghapus {temp_file}: {e}")
+        except Exception as e:
+            print(f"⚠️  Error dalam cleanup: {e}")
