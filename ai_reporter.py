@@ -10,6 +10,9 @@ from database import db
 from datetime import datetime
 import time
 import logging
+import re
+import html
+import mdformat
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -230,6 +233,295 @@ class AIReporter:
         logger.info(f"Adjusted text length: {len(adjusted_text)}")
         return adjusted_text
     
+    def get_model_max_completion_tokens(self, model_id):
+        """
+        Mendapatkan batas maksimum token completion untuk model tertentu.
+        Mengambil informasi dari API OpenRouter atau menggunakan nilai default.
+        """
+        try:
+            logger.info(f"Getting max completion tokens for model: {model_id}")
+            
+            # Jika ada API key, coba dapatkan dari API
+            if self.api_key:
+                headers = {
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json"
+                }
+                
+                response = requests.get(
+                    "https://openrouter.ai/api/v1/models",
+                    headers=headers,
+                    timeout=10
+                )
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    models = data.get('data', [])
+                    
+                    for model in models:
+                        if model.get('id') == model_id:
+                            # Dapatkan max_completion_tokens dari top_provider
+                            top_provider = model.get('top_provider', {})
+                            max_completion_tokens = top_provider.get('max_completion_tokens')
+                            
+                            if max_completion_tokens:
+                                logger.info(f"Max completion tokens for {model_id}: {max_completion_tokens}")
+                                return max_completion_tokens
+                            else:
+                                # Jika tidak ada info spesifik, gunakan default berdasarkan context_length
+                                context_length = model.get('context_length', 4096)
+                                # Gunakan 1/4 dari context length sebagai estimasi max completion
+                                estimated_max = min(context_length // 4, 4000)  # Maksimal 4000
+                                logger.info(f"No max completion info, using estimated max: {estimated_max}")
+                                return estimated_max
+            
+            # Jika tidak ada API key atau gagal, gunakan default values
+            default_max_tokens = {
+                'mistralai/mistral-7b-instruct:free': 4000,
+                'qwen/qwen3-235b-a22b:free': 8000,
+                'google/gemini-flash-1.5-8b:free': 8000,
+                'microsoft/phi-3-mini-128k-instruct:free': 4000,
+                'openchat/openchat-7b:free': 4000,
+                'google/gemma-2-9b-it:free': 4000,
+                'meta-llama/llama-3.1-8b-instruct:free': 4000,
+                'mistralai/mistral-nemo:free': 4000,
+                'openai/gpt-3.5-turbo': 4096,
+                'openai/gpt-4': 4096,
+                'openai/gpt-4-turbo': 8192,
+                'openai/gpt-4o': 16384,
+                'anthropic/claude-3-haiku:free': 4096,
+                'anthropic/claude-3-sonnet:free': 4096,
+                'meta-llama/llama-3-70b-instruct': 4096,
+                'meta-llama/llama-3-8b-instruct': 4096
+            }
+            
+            max_tokens = default_max_tokens.get(model_id, 4000)
+            logger.info(f"Using default max tokens for {model_id}: {max_tokens}")
+            return max_tokens
+            
+        except Exception as e:
+            logger.error(f"Error getting max completion tokens: {e}")
+            # Return nilai aman default
+            return 4000
+
+    def calculate_optimal_max_tokens(self, model_id, report_type="summary"):
+        """
+        Menghitung max_tokens optimal berdasarkan tipe laporan dan model.
+        
+        Args:
+            model_id (str): ID model yang digunakan
+            report_type (str): Tipe laporan ("summary", "analysis", "custom")
+        
+        Returns:
+            int: Max tokens yang direkomendasikan
+        """
+        max_model_tokens = self.get_model_max_completion_tokens(model_id)
+        
+        # Tentukan max_tokens berdasarkan tipe laporan
+        if report_type == "summary":
+            # Untuk ringkasan, gunakan 50-70% dari kapasitas model
+            recommended = min(int(max_model_tokens * 1), 5000)
+        elif report_type == "analysis":
+            # Untuk analisis, gunakan 60-80% dari kapasitas model
+            recommended = min(int(max_model_tokens * 1), 6000)
+        elif report_type == "custom":
+            # Untuk laporan kustom, gunakan 70-90% dari kapasitas model
+            recommended = min(int(max_model_tokens * 1), 8000)
+        else:
+            # Default untuk tipe lainnya
+            recommended = min(int(max_model_tokens * 1), 4000)
+        
+        logger.info(f"Calculated optimal max_tokens for {report_type} with {model_id}: {recommended}")
+        return recommended
+
+    def format_report_content_for_document(self, content: str):
+        """
+        Memformat konten laporan untuk dokumen DOCX/PDF dengan menangani bagian <think>.
+        
+        Args:
+            content (str): Konten laporan yang akan diformat
+            
+        Returns:
+            tuple: (plain_content, html_content) - Konten yang telah diformat
+        """
+        logger.info("Formatting report content for document")
+        
+        # Normalisasi line endings
+        content = content.replace('\r\n', '\n').replace('\r', '\n')
+        
+        # Ekstrak dan proses bagian <think>
+        think_sections = []
+        def extract_think_section(match):
+            think_content = match.group(1)
+            think_sections.append(think_content)
+            # Return placeholder yang akan diganti nanti
+            return f"<<<THINK_PLACEHOLDER_{len(think_sections)-1}>>>"
+        
+        # Ekstrak bagian <think>
+        content = re.sub(r'<think>(.*?)</think>', extract_think_section, content, flags=re.DOTALL)
+        
+        # Bersihkan karakter yang tidak diinginkan tapi pertahankan struktur
+        content = re.sub(r'[^\S\n]+$', '', content, flags=re.MULTILINE)  # hapus spasi di akhir baris
+        content = re.sub(r'\n{3,}', '\n\n', content)  # maksimal 2 baris kosong berturut-turut
+        
+        # Konversi heading markdown ke format yang konsisten
+        # H1 sampai H6
+        for i in range(6, 0, -1):
+            pattern = r'^' + ('#' * i) + r'\s+(.+)$'
+            replacement = '#' * i + r' \1'
+            content = re.sub(pattern, replacement, content, flags=re.MULTILINE)
+        
+        # Konversi bold dan italic
+        content = re.sub(r'\*\*(.*?)\*\*', r'**\1**', content)  # bold
+        content = re.sub(r'\*(.*?)\*', r'*\1*', content)        # italic
+        
+        # Konversi list
+        content = re.sub(r'^\s*-\s+(.+)', r'- \1', content, flags=re.MULTILINE)  # unordered list
+        content = re.sub(r'^\s*\d+\.\s+(.+)', r'1. \1', content, flags=re.MULTILINE)  # ordered list
+        
+        # Persiapkan versi HTML untuk dokumen yang mendukung HTML
+        html_content = content
+        
+        # Konversi untuk HTML (jika diperlukan)
+        # Heading
+        for i in range(6, 0, -1):
+            pattern = r'^' + ('#' * i) + r'\s+(.+)$'
+            replacement = f'<h{i}>\\1</h{i}>'
+            html_content = re.sub(pattern, replacement, html_content, flags=re.MULTILINE)
+        
+        # Bold dan italic
+        html_content = re.sub(r'\*\*(.*?)\*\*', r'<strong>\1</strong>', html_content)
+        html_content = re.sub(r'\*(.*?)\*', r'<em>\1</em>', html_content)
+        
+        # List
+        html_content = re.sub(r'^-\s+(.+)', r'<li>\1</li>', html_content, flags=re.MULTILINE)
+        html_content = re.sub(r'(<li>.*?</li>\s*)+', r'<ul>\n\g<0></ul>\n', html_content, flags=re.DOTALL)
+        
+        html_content = re.sub(r'^\d+\.\s+(.+)', r'<li>\1</li>', html_content, flags=re.MULTILINE)
+        html_content = re.sub(r'(<li>.*?</li>\s*)+', r'<ol>\n\g<0></ol>\n', html_content, flags=re.DOTALL)
+        
+        # Masukkan kembali bagian think dengan format yang sesuai
+        for i, think_content in enumerate(think_sections):
+            # Format untuk konten teks biasa
+            think_placeholder = f"<<<THINK_PLACEHOLDER_{i}>>>"
+            formatted_think = f"\n[Proses Berpikir]\n{think_content}\n"
+            content = content.replace(think_placeholder, formatted_think)
+            
+            # Format untuk HTML
+            html_think = f'<div class="think-box"><h3>💭 Proses Berpikir</h3><p>{html.escape(think_content)}</p></div>'
+            html_content = html_content.replace(think_placeholder, html_think)
+        
+        # Pastikan ada baris baru di akhir
+        if not content.endswith('\n'):
+            content += '\n'
+        
+        if not html_content.endswith('\n'):
+            html_content += '\n'
+        
+        return content, html_content
+
+    def clean_for_docx(self, content: str) -> str:
+        """
+        Membersihkan dan memformat konten untuk format DOCX menggunakan mdformat.
+        """
+        try:
+            # Gunakan mdformat untuk memformat konten Markdown
+            formatted_content = mdformat.text(content)
+            
+            # Lanjutkan dengan pembersihan karakter khusus untuk DOCX
+            replacements = {
+                '\u2013': '-',  # en dash
+                '\u2014': '-',  # em dash
+                '\u2018': "'",  # left single quotation mark
+                '\u2019': "'",  # right single quotation mark
+                '\u201c': '"',  # left double quotation mark
+                '\u201d': '"',  # right double quotation mark
+                '\u2026': '...', # horizontal ellipsis
+            }
+            
+            for unicode_char, replacement in replacements.items():
+                formatted_content = formatted_content.replace(unicode_char, replacement)
+            
+            # Hapus karakter kontrol yang tidak diizinkan di XML/DOCX
+            cleaned_content = ""
+            for char in formatted_content:
+                if ord(char) == 0x09 or ord(char) == 0x0A or ord(char) == 0x0D or \
+                   (0x20 <= ord(char) <= 0xD7FF) or \
+                   (0xE000 <= ord(char) <= 0xFFFD) or \
+                   (0x10000 <= ord(char) <= 0x10FFFF):
+                    cleaned_content += char
+                else:
+                    # Ganti karakter tidak valid dengan spasi
+                    cleaned_content += ' '
+            
+            return cleaned_content.strip()
+        except Exception as e:
+            # Jika mdformat gagal, fallback ke pembersihan dasar
+            logger.warning(f"mdformat failed: {e}. Using basic cleaning.")
+            return self.basic_clean_for_docx(content)
+
+    def clean_for_pdf(self, content: str) -> str:
+        """
+        Membersihkan dan memformat konten untuk format PDF menggunakan mdformat.
+        """
+        try:
+            # Gunakan mdformat untuk memformat konten Markdown
+            formatted_content = mdformat.text(content)
+            
+            # Untuk PDF, kita bisa mempertahankan lebih banyak karakter Unicode
+            # Tapi tetap perlu membersihkan karakter kontrol
+            cleaned_content = ""
+            for char in formatted_content:
+                if ord(char) >= 32 or char in '\n\r\t':
+                    cleaned_content += char
+                else:
+                    # Ganti karakter kontrol dengan spasi
+                    cleaned_content += ' '
+            
+            return cleaned_content.strip()
+        except Exception as e:
+            # Jika mdformat gagal, fallback ke pembersihan dasar
+            logger.warning(f"mdformat failed: {e}. Using basic cleaning.")
+            return self.basic_clean_for_pdf(content)
+
+    # Fungsi pembersihan dasar sebagai fallback (contoh untuk DOCX)
+    def basic_clean_for_docx(self, content: str) -> str:
+        # Normalisasi line ending
+        content = content.replace('\r\n', '\n').replace('\r', '\n')
+        
+        # Tambahkan pembersihan karakter Unicode dan kontrol seperti sebelumnya
+        replacements = {
+            '\u2013': '-',  # en dash
+            '\u2014': '-',  # em dash
+            # ... tambahkan lainnya
+        }
+        for unicode_char, replacement in replacements.items():
+            content = content.replace(unicode_char, replacement)
+        
+        cleaned_content = ""
+        for char in content:
+            if ord(char) == 0x09 or ord(char) == 0x0A or ord(char) == 0x0D or \
+               (0x20 <= ord(char) <= 0xD7FF) or \
+               (0xE000 <= ord(char) <= 0xFFFD) or \
+               (0x10000 <= ord(char) <= 0x10FFFF):
+                cleaned_content += char
+            else:
+                cleaned_content += ' '
+        return cleaned_content.strip()
+
+    # Fungsi pembersihan dasar sebagai fallback (contoh untuk PDF)
+    def basic_clean_for_pdf(self, content: str) -> str:
+        # Normalisasi line ending
+        content = content.replace('\r\n', '\n').replace('\r', '\n')
+        
+        cleaned_content = ""
+        for char in content:
+            if ord(char) >= 32 or char in '\n\r\t':
+                cleaned_content += char
+            else:
+                cleaned_content += ' '
+        return cleaned_content.strip()
+
     def generate_summary(self, transcription_text, model_id="mistralai/mistral-7b-instruct:free"):
         """Generate ringkasan dari transkripsi"""
         logger.info(f"Generating summary with model: {model_id}")
@@ -466,169 +758,13 @@ class AIReporter:
             logger.error(f"Gagal menghasilkan laporan kustom: {str(e)}")
             raise Exception(f"Gagal menghasilkan laporan kustom: {str(e)}")
     
-    def generate_analysis(self, transcription_text, analysis_type="general", model_id="mistralai/mistral-7b-instruct:free"):
-        """Generate analisis dari transkripsi"""
-        logger.info(f"Generating analysis with model: {model_id}, type: {analysis_type}")
-        
-        if not self.api_key:
-            logger.error("API key not found")
-            raise Exception("API key tidak ditemukan.")
-        
-        # Simpan model yang digunakan
-        self.save_user_model(model_id, model_id)
-        
-        # Sesuaikan teks dengan context length model
-        adjusted_text = self.adjust_text_to_context(transcription_text, model_id, 1500)
-        logger.info(f"Adjusted text length: {len(adjusted_text)}")
-        
-        analysis_prompts = {
-            "general": """
-            Lakukan analisis komprehensif terhadap transkripsi berikut dalam bahasa Indonesia:
-            
-            Transkripsi:
-            {text}
-            
-            Berikan analisis yang mencakup:
-            1. Tema utama yang dibahas
-            2. Sentimen keseluruhan
-            3. Poin-poin penting
-            4. Insight menarik
-            5. Rekomendasi berdasarkan analisis
-            """,
-            
-            "sentiment": """
-            Analisis sentimen dari transkripsi berikut dalam bahasa Indonesia:
-            
-            Transkripsi:
-            {text}
-            
-            Berikan analisis yang mencakup:
-            1. Sentimen keseluruhan (positif/negatif/netral)
-            2. Emosi yang dominan
-            3. Poin-poin dengan sentimen berbeda
-            4. Rekomendasi untuk meningkatkan komunikasi
-            """,
-            
-            "keypoints": """
-            Identifikasi poin-poin kunci dari transkripsi berikut dalam bahasa Indonesia:
-            
-            Transkripsi:
-            {text}
-            
-            Ekstrak dan organisir poin-poin penting yang mencakup:
-            1. Keputusan penting yang diambil
-            2. Isu-isu yang dibahas
-            3. Tindakan yang disepakati
-            4. Waktu dan tanggal penting
-            5. Pihak-pihak yang terlibat
-            """
-        }
-        
-        prompt_template = analysis_prompts.get(analysis_type, analysis_prompts["general"])
-        prompt = prompt_template.format(text=adjusted_text)
-        logger.info(f"Prompt length: {len(prompt)} characters")
-        
-        try:
-            # Validasi model ID
-            if not model_id or model_id == "":
-                model_id = "mistralai/mistral-7b-instruct:free"
-                logger.warning("Using default model due to empty model_id")
-                
-            logger.info("Sending request to OpenAI API")
-            response = openai.ChatCompletion.create(
-                model=model_id,
-                messages=[
-                    {"role": "system", "content": "Anda adalah analis yang ahli dalam menganalisis transkripsi dalam bahasa Indonesia."},
-                    {"role": "user", "content": prompt}
-                ],
-                max_tokens=1500,
-                temperature=0.7,
-                timeout=120
-            )
-            
-            result = response.choices[0].message.content.strip()
-            logger.info(f"Analysis generated successfully. Response length: {len(result)} characters")
-            return result
-        except openai.error.Timeout as e:
-            logger.error(f"Timeout saat menghasilkan analisis: {str(e)}")
-            raise Exception(f"Timeout saat menghasilkan analisis: {str(e)}")
-        except openai.error.APIError as e:
-            logger.error(f"API Error: {str(e)}")
-            raise Exception(f"API Error: {str(e)}")
-        except Exception as e:
-            logger.error(f"Gagal menghasilkan analisis: {str(e)}")
-            raise Exception(f"Gagal menghasilkan analisis: {str(e)}")
-    
-    def generate_custom_report(self, transcription_text, custom_prompt, model_id="mistralai/mistral-7b-instruct:free"):
-        """Generate laporan kustom berdasarkan prompt user"""
-        logger.info(f"Generating custom report with model: {model_id}")
-        
-        if not self.api_key:
-            logger.error("API key not found")
-            raise Exception("API key tidak ditemukan.")
-        
-        # Validasi input
-        if not custom_prompt or not custom_prompt.strip():
-            logger.error("Custom prompt is empty")
-            raise Exception("Prompt kustom tidak boleh kosong.")
-        
-        # Simpan model yang digunakan
-        self.save_user_model(model_id, model_id)
-        
-        # Sesuaikan teks dengan context length model
-        adjusted_text = self.adjust_text_to_context(transcription_text, model_id, 2000)
-        logger.info(f"Adjusted text length: {len(adjusted_text)}")
-        
-        full_prompt = f"""
-        Berdasarkan transkripsi berikut dalam bahasa Indonesia:
-        
-        Transkripsi:
-        {adjusted_text}
-        
-        Petunjuk pengguna:
-        {custom_prompt}
-        
-        Harap berikan jawaban yang komprehensif dan terstruktur dalam bahasa Indonesia.
-        Pastikan jawaban Anda relevan dengan transkripsi dan petunjuk yang diberikan.
-        """
-        
-        logger.info(f"Full prompt length: {len(full_prompt)} characters")
-        
-        try:
-            # Validasi model ID
-            if not model_id or model_id == "":
-                model_id = "mistralai/mistral-7b-instruct:free"
-                logger.warning("Using default model due to empty model_id")
-            
-            logger.info("Sending request to OpenAI API")
-            response = openai.ChatCompletion.create(
-                model=model_id,
-                messages=[
-                    {"role": "system", "content": "Anda adalah asisten yang ahli dalam membuat laporan berdasarkan instruksi spesifik dalam bahasa Indonesia."},
-                    {"role": "user", "content": full_prompt}
-                ],
-                max_tokens=2000,
-                temperature=0.7,
-                timeout=180  # 3 menit timeout untuk custom report
-            )
-            
-            result = response.choices[0].message.content.strip()
-            logger.info(f"Custom report generated successfully. Response length: {len(result)} characters")
-            return result
-        except openai.error.Timeout as e:
-            logger.error(f"Timeout saat menghasilkan laporan kustom: {str(e)}")
-            raise Exception(f"Timeout saat menghasilkan laporan kustom: {str(e)}")
-        except openai.error.APIError as e:
-            logger.error(f"API Error: {str(e)}")
-            raise Exception(f"API Error: {str(e)}")
-        except Exception as e:
-            logger.error(f"Gagal menghasilkan laporan kustom: {str(e)}")
-            raise Exception(f"Gagal menghasilkan laporan kustom: {str(e)}")
-    
     def create_docx_report(self, title, content, output_path):
         """Buat laporan dalam format DOCX"""
         logger.info(f"Creating DOCX report: {output_path}")
         try:
+            # Bersihkan konten terlebih dahulu
+            cleaned_content = self.clean_for_docx(content)
+            
             doc = Document()
             
             # Judul
@@ -638,14 +774,75 @@ class AIReporter:
             doc.add_paragraph(f'Dibuat pada: {datetime.now().strftime("%d %B %Y, %H:%M:%S")}')
             doc.add_paragraph('')
             
-            # Konten
-            doc.add_heading('Laporan', level=1)
+            # Konten - split berdasarkan baris baru dan proses markdown
+            lines = cleaned_content.split('\n')
+            in_list = False
+            list_items = []
             
-            # Split content into paragraphs
-            paragraphs = content.split('\n\n')
-            for para in paragraphs:
-                if para.strip():
-                    doc.add_paragraph(para.strip())
+            for line in lines:
+                line = line.strip()
+                
+                # Skip empty lines
+                if not line:
+                    # Jika dalam list, tambahkan list items
+                    if in_list and list_items:
+                        paragraph = doc.add_paragraph()
+                        for item in list_items:
+                            paragraph.add_run('• ').bold = True
+                            paragraph.add_run(item + '\n')
+                        list_items = []
+                        in_list = False
+                    continue
+                
+                # Cek heading
+                if line.startswith('# '):
+                    if in_list and list_items:
+                        paragraph = doc.add_paragraph()
+                        for item in list_items:
+                            paragraph.add_run('• ').bold = True
+                            paragraph.add_run(item + '\n')
+                        list_items = []
+                        in_list = False
+                    doc.add_heading(line[2:], level=1)
+                elif line.startswith('## '):
+                    if in_list and list_items:
+                        paragraph = doc.add_paragraph()
+                        for item in list_items:
+                            paragraph.add_run('• ').bold = True
+                            paragraph.add_run(item + '\n')
+                        list_items = []
+                        in_list = False
+                    doc.add_heading(line[3:], level=2)
+                elif line.startswith('### '):
+                    if in_list and list_items:
+                        paragraph = doc.add_paragraph()
+                        for item in list_items:
+                            paragraph.add_run('• ').bold = True
+                            paragraph.add_run(item + '\n')
+                        list_items = []
+                        in_list = False
+                    doc.add_heading(line[4:], level=3)
+                elif line.startswith('- ') or line.startswith('* '):
+                    # List item
+                    in_list = True
+                    list_items.append(line[2:])
+                else:
+                    # Paragraf biasa
+                    if in_list and list_items:
+                        paragraph = doc.add_paragraph()
+                        for item in list_items:
+                            paragraph.add_run('• ').bold = True
+                            paragraph.add_run(item + '\n')
+                        list_items = []
+                        in_list = False
+                    doc.add_paragraph(line)
+            
+            # Tambahkan list items yang tersisa
+            if in_list and list_items:
+                paragraph = doc.add_paragraph()
+                for item in list_items:
+                    paragraph.add_run('• ').bold = True
+                    paragraph.add_run(item + '\n')
             
             doc.save(output_path)
             logger.info(f"DOCX report saved successfully: {output_path}")
@@ -658,6 +855,9 @@ class AIReporter:
         """Buat laporan dalam format PDF"""
         logger.info(f"Creating PDF report: {output_path}")
         try:
+            # Bersihkan konten terlebih dahulu
+            cleaned_content = self.clean_for_pdf(content)
+            
             pdf = FPDF()
             pdf.add_page()
             pdf.set_auto_page_break(auto=True, margin=15)
@@ -682,7 +882,7 @@ class AIReporter:
             pdf.set_font('Arial', '', 12)
             
             # Split content and add to PDF
-            lines = content.split('\n')
+            lines = cleaned_content.split('\n')
             for line in lines:
                 # Handle encoding issues
                 try:
@@ -709,105 +909,6 @@ class AIReporter:
         except Exception as e:
             logger.error(f"Gagal membuat file PDF: {str(e)}")
             raise Exception(f"Gagal membuat file PDF: {str(e)}")
-def get_model_max_completion_tokens(self, model_id):
-    """
-    Mendapatkan batas maksimum token completion untuk model tertentu.
-    Mengambil informasi dari API OpenRouter atau menggunakan nilai default.
-    """
-    try:
-        logger.info(f"Getting max completion tokens for model: {model_id}")
-        
-        # Jika ada API key, coba dapatkan dari API
-        if self.api_key:
-            headers = {
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json"
-            }
-            
-            response = requests.get(
-                "https://openrouter.ai/api/v1/models",
-                headers=headers,
-                timeout=10
-            )
-            
-            if response.status_code == 200:
-                data = response.json()
-                models = data.get('data', [])
-                
-                for model in models:
-                    if model.get('id') == model_id:
-                        # Dapatkan max_completion_tokens dari top_provider
-                        top_provider = model.get('top_provider', {})
-                        max_completion_tokens = top_provider.get('max_completion_tokens')
-                        
-                        if max_completion_tokens:
-                            logger.info(f"Max completion tokens for {model_id}: {max_completion_tokens}")
-                            return max_completion_tokens
-                        else:
-                            # Jika tidak ada info spesifik, gunakan default berdasarkan context_length
-                            context_length = model.get('context_length', 4096)
-                            # Gunakan 1/4 dari context length sebagai estimasi max completion
-                            estimated_max = min(context_length // 4, 4000)  # Maksimal 4000
-                            logger.info(f"No max completion info, using estimated max: {estimated_max}")
-                            return estimated_max
-        
-        # Jika tidak ada API key atau gagal, gunakan default values
-        default_max_tokens = {
-            'mistralai/mistral-7b-instruct:free': 4000,
-            'qwen/qwen3-235b-a22b:free': 8000,  # Terbukti berhasil di Postman Anda
-            'google/gemini-flash-1.5-8b:free': 8000,
-            'microsoft/phi-3-mini-128k-instruct:free': 4000,
-            'openchat/openchat-7b:free': 4000,
-            'google/gemma-2-9b-it:free': 4000,
-            'meta-llama/llama-3.1-8b-instruct:free': 4000,
-            'mistralai/mistral-nemo:free': 4000,
-            'openai/gpt-3.5-turbo': 4096,
-            'openai/gpt-4': 4096,
-            'openai/gpt-4-turbo': 8192,
-            'openai/gpt-4o': 16384,
-            'anthropic/claude-3-haiku:free': 4096,
-            'anthropic/claude-3-sonnet:free': 4096,
-            'meta-llama/llama-3-70b-instruct': 4096,
-            'meta-llama/llama-3-8b-instruct': 4096
-        }
-        
-        max_tokens = default_max_tokens.get(model_id, 4000)
-        logger.info(f"Using default max tokens for {model_id}: {max_tokens}")
-        return max_tokens
-        
-    except Exception as e:
-        logger.error(f"Error getting max completion tokens: {e}")
-        # Return nilai aman default
-        return 4000
 
-def calculate_optimal_max_tokens(self, model_id, report_type="summary"):
-    """
-    Menghitung max_tokens optimal berdasarkan tipe laporan dan model.
-    
-    Args:
-        model_id (str): ID model yang digunakan
-        report_type (str): Tipe laporan ("summary", "analysis", "custom")
-    
-    Returns:
-        int: Max tokens yang direkomendasikan
-    """
-    max_model_tokens = self.get_model_max_completion_tokens(model_id)
-    
-    # Tentukan max_tokens berdasarkan tipe laporan
-    if report_type == "summary":
-        # Untuk ringkasan, gunakan 50-70% dari kapasitas model
-        recommended = min(int(max_model_tokens * 1), 5000)
-    elif report_type == "analysis":
-        # Untuk analisis, gunakan 60-80% dari kapasitas model
-        recommended = min(int(max_model_tokens * 1), 6000)
-    elif report_type == "custom":
-        # Untuk laporan kustom, gunakan 70-90% dari kapasitas model
-        recommended = min(int(max_model_tokens * 1), 8000)
-    else:
-        # Default untuk tipe lainnya
-        recommended = min(int(max_model_tokens * 1), 4000)
-    
-    logger.info(f"Calculated optimal max_tokens for {report_type} with {model_id}: {recommended}")
-    return recommended
 # Inisialisasi AI Reporter
 ai_reporter = AIReporter()

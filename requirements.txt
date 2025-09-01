@@ -23,3 +23,5 @@ fpdf2>=2.7.0
 
 # Optional but recommended
 python-dotenv>=1.0.0
+
+mdformat

@@ -9,6 +9,9 @@ from database import db
 from setup import setup_environment
 from ai_reporter import ai_reporter
 import openai
+import re
+import html
+from typing import Tuple
 
 app = Flask(__name__)
 app.secret_key = 'whisper_transcriber_secret_key'
@@ -406,6 +409,172 @@ def view_report(report_id):
         flash(f'Error loading report: {str(e)}')
         return redirect(url_for('view_reports'))
 
+
+
+def format_report_content_for_document(content: str) -> Tuple[str, str]:
+    """
+    Memformat konten laporan untuk dokumen DOCX/PDF dengan menangani markdown dan komponen khusus.
+    
+    Args:
+        content (str): Konten laporan mentah
+        
+    Returns:
+        Tuple[str, str]: Tuple berisi (formatted_content, html_content) untuk keperluan berbeda
+    """
+    
+    # Normalisasi line endings
+    content = content.replace('\r\n', '\n').replace('\r', '\n')
+    
+    # Simpan bagian think terlebih dahulu
+    think_sections = []
+    
+    def extract_think_section(match):
+        think_content = match.group(1).strip()
+        think_sections.append(think_content)
+        return f"<<<THINK_PLACEHOLDER_{len(think_sections)-1}>>>"
+    
+    # Ekstrak semua bagian <think>
+    content = re.sub(r'<think>(.*?)</think>', extract_think_section, content, flags=re.DOTALL)
+    
+    # Bersihkan karakter yang tidak diinginkan tapi pertahankan struktur
+    content = re.sub(r'[^\S\n]+$', '', content, flags=re.MULTILINE)  # hapus spasi di akhir baris
+    content = re.sub(r'\n{3,}', '\n\n', content)  # maksimal 2 baris kosong berturut-turut
+    
+    # Konversi heading markdown ke format yang konsisten
+    # H1
+    content = re.sub(r'^#\s+(.+)', r'# \1', content, flags=re.MULTILINE)
+    # H2
+    content = re.sub(r'^##\s+(.+)', r'## \1', content, flags=re.MULTILINE)
+    # H3
+    content = re.sub(r'^###\s+(.+)', r'### \1', content, flags=re.MULTILINE)
+    # H4
+    content = re.sub(r'^####\s+(.+)', r'#### \1', content, flags=re.MULTILINE)
+    # H5
+    content = re.sub(r'^#####\s+(.+)', r'##### \1', content, flags=re.MULTILINE)
+    # H6
+    content = re.sub(r'^######\s+(.+)', r'###### \1', content, flags=re.MULTILINE)
+    
+    # Konversi bold dan italic
+    content = re.sub(r'\*\*(.*?)\*\*', r'**\1**', content)  # bold
+    content = re.sub(r'\*(.*?)\*', r'*\1*', content)        # italic
+    
+    # Konversi list
+    content = re.sub(r'^\s*-\s+(.+)', r'- \1', content, flags=re.MULTILINE)  # unordered list
+    content = re.sub(r'^\s*\d+\.\s+(.+)', r'1. \1', content, flags=re.MULTILINE)  # ordered list
+    
+    # Persiapkan versi HTML untuk dokumen yang mendukung HTML
+    html_content = content
+    
+    # Konversi untuk HTML (jika diperlukan)
+    # Heading
+    html_content = re.sub(r'^######\s+(.+)', r'<h6>\1</h6>', html_content, flags=re.MULTILINE)
+    html_content = re.sub(r'^#####\s+(.+)', r'<h5>\1</h5>', html_content, flags=re.MULTILINE)
+    html_content = re.sub(r'^####\s+(.+)', r'<h4>\1</h4>', html_content, flags=re.MULTILINE)
+    html_content = re.sub(r'^###\s+(.+)', r'<h3>\1</h3>', html_content, flags=re.MULTILINE)
+    html_content = re.sub(r'^##\s+(.+)', r'<h2>\1</h2>', html_content, flags=re.MULTILINE)
+    html_content = re.sub(r'^#\s+(.+)', r'<h1>\1</h1>', html_content, flags=re.MULTILINE)
+    
+    # Bold dan italic
+    html_content = re.sub(r'\*\*(.*?)\*\*', r'<strong>\1</strong>', html_content)
+    html_content = re.sub(r'\*(.*?)\*', r'<em>\1</em>', html_content)
+    
+    # List
+    html_content = re.sub(r'^-\s+(.+)', r'<li>\1</li>', html_content, flags=re.MULTILINE)
+    html_content = re.sub(r'(<li>.*?</li>\s*)+', r'<ul>\n\g<0></ul>\n', html_content, flags=re.DOTALL)
+    
+    html_content = re.sub(r'^\d+\.\s+(.+)', r'<li>\1</li>', html_content, flags=re.MULTILINE)
+    html_content = re.sub(r'(<li>.*?</li>\s*)+', r'<ol>\n\g<0></ol>\n', html_content, flags=re.DOTALL)
+    
+    # Masukkan kembali bagian think dengan format yang sesuai
+    for i, think_content in enumerate(think_sections):
+        # Format untuk konten teks biasa
+        think_placeholder = f"<<<THINK_PLACEHOLDER_{i}>>>"
+        formatted_think = f"\n[Proses Berpikir]\n{think_content}\n"
+        content = content.replace(think_placeholder, formatted_think)
+        
+        # Format untuk HTML
+        html_think = f'<div class="think-box"><h3>💭 Proses Berpikir</h3><p>{html.escape(think_content)}</p></div>'
+        html_content = html_content.replace(think_placeholder, html_think)
+    
+    # Pastikan ada baris baru di akhir
+    if not content.endswith('\n'):
+        content += '\n'
+    
+    if not html_content.endswith('\n'):
+        html_content += '\n'
+    
+    return content, html_content
+
+def clean_for_docx(content: str) -> str:
+    """
+    Membersihkan konten untuk format DOCX.
+    
+    Args:
+        content (str): Konten yang akan dibersihkan
+        
+    Returns:
+        str: Konten yang telah dibersihkan untuk DOCX
+    """
+    # Gunakan fungsi format utama
+    plain_content, _ = format_report_content_for_document(content)
+    
+    # Tambahkan pembersihan khusus untuk DOCX
+    # Ganti karakter yang bermasalah di DOCX
+    replacements = {
+        '\u2013': '-',  # en dash
+        '\u2014': '-',  # em dash
+        '\u2018': "'",  # left single quotation mark
+        '\u2019': "'",  # right single quotation mark
+        '\u201c': '"',  # left double quotation mark
+        '\u201d': '"',  # right double quotation mark
+        '\u2026': '...', # horizontal ellipsis
+    }
+    
+    for unicode_char, replacement in replacements.items():
+        plain_content = plain_content.replace(unicode_char, replacement)
+    
+    # Hapus karakter kontrol yang tidak diizinkan di XML/DOCX
+    # Izinkan hanya karakter yang valid dalam XML
+    cleaned_content = ""
+    for char in plain_content:
+        if ord(char) == 0x09 or ord(char) == 0x0A or ord(char) == 0x0D or \
+           (0x20 <= ord(char) <= 0xD7FF) or \
+           (0xE000 <= ord(char) <= 0xFFFD) or \
+           (0x10000 <= ord(char) <= 0x10FFFF):
+            cleaned_content += char
+        else:
+            # Ganti karakter tidak valid dengan spasi
+            cleaned_content += ' '
+    
+    return cleaned_content.strip()
+
+def clean_for_pdf(content: str) -> str:
+    """
+    Membersihkan konten untuk format PDF.
+    
+    Args:
+        content (str): Konten yang akan dibersihkan
+        
+    Returns:
+        str: Konten yang telah dibersihkan untuk PDF
+    """
+    # Gunakan fungsi format utama
+    plain_content, _ = format_report_content_for_document(content)
+    
+    # Untuk PDF, kita bisa mempertahankan lebih banyak karakter Unicode
+    # Tapi tetap perlu membersihkan karakter kontrol
+    cleaned_content = ""
+    for char in plain_content:
+        if ord(char) >= 32 or char in '\n\r\t':
+            cleaned_content += char
+        else:
+            # Ganti karakter kontrol dengan spasi
+            cleaned_content += ' '
+    
+    return cleaned_content.strip()
+
+# Contoh penggunaan dalam fungsi download_report
+# app.py (fungsi download_report yang dimodifikasi)
 @app.route('/download-report/<int:report_id>/<format>')
 def download_report(report_id, format):
     """Download laporan dalam format DOCX atau PDF"""
@@ -416,16 +585,20 @@ def download_report(report_id, format):
             return redirect(url_for('view_reports'))
         
         report_title = report[2]  # report_title
-        report_content = report[3]  # report_content
+        report_content = report[3]  # report_content original
         
         if format == 'docx':
             filename = f"{report_title.replace(' ', '_')}.docx"
             filepath = os.path.join(app.config['REPORTS_FOLDER'], filename)
-            ai_reporter.create_docx_report(report_title, report_content, filepath)
+            # Bersihkan dan format konten untuk DOCX menggunakan mdformat
+            cleaned_content = clean_for_docx(report_content)
+            ai_reporter.create_docx_report(report_title, cleaned_content, filepath)
         elif format == 'pdf':
             filename = f"{report_title.replace(' ', '_')}.pdf"
             filepath = os.path.join(app.config['REPORTS_FOLDER'], filename)
-            ai_reporter.create_pdf_report(report_title, report_content, filepath)
+            # Bersihkan dan format konten untuk PDF menggunakan mdformat
+            cleaned_content = clean_for_pdf(report_content)
+            ai_reporter.create_pdf_report(report_title, cleaned_content, filepath)
         else:
             flash('Format tidak didukung')
             return redirect(url_for('view_report', report_id=report_id))
