@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Model AI - Whisper Transcriber</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        .model-card {
+            transition: transform 0.2s;
+            height: 100%;
+        }
+        .model-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+        }
+        .free-badge {
+            background-color: #28a745;
+            color: white;
+            font-size: 0.7em;
+            padding: 2px 6px;
+            border-radius: 4px;
+        }
+        .premium-badge {
+            background-color: #007bff;
+            color: white;
+            font-size: 0.7em;
+            padding: 2px 6px;
+            border-radius: 4px;
+        }
+        .context-info {
+            font-size: 0.85em;
+        }
+        .model-id {
+            font-family: monospace;
+            font-size: 0.75em;
+            background-color: #f8f9fa;
+            padding: 2px 4px;
+            border-radius: 3px;
+        }
+        .loading-spinner {
+            display: none;
+            text-align: center;
+            padding: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container mt-4">
+        <div class="d-flex justify-content-between align-items-center mb-4">
+            <h1>🤖 Model AI</h1>
+            <div>
+                <a href="/ai-settings" class="btn btn-outline-primary">⚙️ Settings</a>
+                <a href="/" class="btn btn-secondary">← Kembali</a>
+            </div>
+        </div>
+        
+        {% with messages = get_flashed_messages() %}
+            {% if messages %}
+                {% for message in messages %}
+                    <div class="alert alert-info alert-dismissible fade show" role="alert">
+                        {{ message }}
+                        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+                    </div>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
+        
+        {% if not api_key_set %}
+            <div class="alert alert-warning">
+                ⚠️ API key belum diatur. Silakan atur di <a href="/ai-settings">halaman AI Settings</a> untuk melihat semua model.
+            </div>
+        {% endif %}
+        
+        <!-- User Models -->
+        {% if user_models and user_models|length > 0 %}
+        <div class="card mb-4">
+            <div class="card-header">
+                <h5>🕒 Model yang Pernah Digunakan</h5>
+            </div>
+            <div class="card-body">
+                <div class="row">
+                    {% for model in user_models %}
+                    <div class="col-md-6 col-lg-4 mb-3">
+                        <div class="card model-card h-100 border-primary">
+                            <div class="card-body">
+                                <h6 class="card-title">{{ model.name or model.id }}</h6>
+                                <small class="text-muted model-id">{{ model.id }}</small>
+                            </div>
+                        </div>
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+        </div>
+        {% endif %}
+        
+        <!-- All Models -->
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h5>🌐 Semua Model Tersedia</h5>
+                <button id="refreshModels" class="btn btn-sm btn-outline-primary">
+                    🔄 Refresh
+                </button>
+            </div>
+            <div class="card-body">
+                <div class="loading-spinner" id="loadingSpinner">
+                    <div class="spinner-border text-primary" role="status">
+                        <span class="visually-hidden">Loading...</span>
+                    </div>
+                    <p class="mt-2">Memuat daftar model dari OpenRouter...</p>
+                </div>
+                
+                <div class="row" id="modelsContainer">
+                    {% if models %}
+                        {% for model in models %}
+                        <div class="col-md-6 col-lg-4 mb-4">
+                            <div class="card model-card h-100">
+                                <div class="card-body">
+                                    <div class="d-flex justify-content-between align-items-start mb-2">
+                                        <h6 class="card-title">{{ model.name }}</h6>
+                                        {% if model.is_free %}
+                                            <span class="free-badge">FREE</span>
+                                        {% else %}
+                                            <span class="premium-badge">PREMIUM</span>
+                                        {% endif %}
+                                    </div>
+                                    
+                                    <p class="card-text">
+                                        <small class="text-muted">{{ model.description or 'Tidak ada deskripsi' }}</small>
+                                    </p>
+                                    
+                                    <div class="mb-2 context-info">
+                                        <small>
+                                            <strong>Context:</strong> {{ "{:,}".format(model.context_length or 0) }} tokens
+                                        </small>
+                                    </div>
+                                    
+                                    <div class="mb-3">
+                                        <small>
+                                            <strong>ID:</strong> 
+                                            <code class="model-id">{{ model.id }}</code>
+                                        </small>
+                                    </div>
+                                    
+                                    <button class="btn btn-sm btn-outline-primary test-model-btn" 
+                                            data-model-id="{{ model.id }}"
+                                            data-model-name="{{ model.name }}">
+                                        🧪 Test Model
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                        {% endfor %}
+                    {% else %}
+                        <div class="col-12">
+                            <div class="text-center">
+                                <p class="text-muted">Tidak ada model yang tersedia.</p>
+                                {% if not api_key_set %}
+                                    <p>Silakan atur API key untuk melihat model yang tersedia.</p>
+                                {% endif %}
+                            </div>
+                        </div>
+                    {% endif %}
+                </div>
+                
+                <div id="testResult" class="mt-4" style="display: none;">
+                    <div class="card">
+                        <div class="card-header d-flex justify-content-between align-items-center">
+                            <h6>🧪 Hasil Test Model</h6>
+                            <button type="button" class="btn-close" id="closeTestResult"></button>
+                        </div>
+                        <div class="card-body">
+                            <div id="testResultContent"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        // Test Model Function
+        document.querySelectorAll('.test-model-btn').forEach(button => {
+            button.addEventListener('click', function() {
+                const modelId = this.getAttribute('data-model-id');
+                const modelName = this.getAttribute('data-model-name');
+                
+                // Show loading
+                const originalText = this.innerHTML;
+                this.innerHTML = '⏳ Testing...';
+                this.disabled = true;
+                
+                // Show test result section
+                document.getElementById('testResult').style.display = 'block';
+                document.getElementById('testResultContent').innerHTML = '<div class="text-center"><div class="spinner-border" role="status"><span class="visually-hidden">Loading...</span></div><p>Testing model...</p></div>';
+                
+                // Scroll to test result
+                document.getElementById('testResult').scrollIntoView({ behavior: 'smooth' });
+                
+                // Send test request
+                fetch('/test-model', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                    },
+                    body: `model_id=${encodeURIComponent(modelId)}`
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.status === 'success') {
+                        document.getElementById('testResultContent').innerHTML = `
+                            <p><strong>Model:</strong> ${modelName}</p>
+                            <p><strong>Hasil:</strong></p>
+                            <div class="bg-light p-3 rounded">
+                                <p>${data.result}</p>
+                            </div>
+                            <div class="mt-2">
+                                <small class="text-muted">Response time: ${data.response_time || 'N/A'}ms</small>
+                            </div>
+                        `;
+                    } else {
+                        document.getElementById('testResultContent').innerHTML = `
+                            <div class="alert alert-danger">
+                                <strong>Error:</strong> ${data.message}
+                            </div>
+                        `;
+                    }
+                })
+                .catch(error => {
+                    document.getElementById('testResultContent').innerHTML = `
+                        <div class="alert alert-danger">
+                            <strong>Error:</strong> ${error.message}
+                        </div>
+                    `;
+                })
+                .finally(() => {
+                    this.innerHTML = originalText;
+                    this.disabled = false;
+                });
+            });
+        });
+        
+        // Close test result
+        document.getElementById('closeTestResult').addEventListener('click', function() {
+            document.getElementById('testResult').style.display = 'none';
+        });
+        
+        // Refresh Models
+        document.getElementById('refreshModels').addEventListener('click', function() {
+            const originalText = this.innerHTML;
+            this.innerHTML = '🔄 Refreshing...';
+            this.disabled = true;
+            
+            // Show loading spinner
+            document.getElementById('loadingSpinner').style.display = 'block';
+            document.getElementById('modelsContainer').style.display = 'none';
+            
+            // Reload page after delay to show loading
+            setTimeout(() => {
+                window.location.reload();
+            }, 500);
+        });
+        
+        // Auto-scroll to test result if it exists
+        document.addEventListener('DOMContentLoaded', function() {
+            if (document.getElementById('testResult') && document.getElementById('testResult').style.display !== 'none') {
+                document.getElementById('testResult').scrollIntoView({ behavior: 'smooth' });
+            }
+        });
+    </script>
+</body>
+</html>
